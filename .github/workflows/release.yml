@@ -37,11 +37,8 @@ jobs:
             artifact: simlite-macos-arm64
             bin: simlite
             archive: tar
-          - name: macos-x64
-            os: macos-13
-            artifact: simlite-macos-x64
-            bin: simlite
-            archive: tar
+          # macos-13 (Intel) costuma ficar preso na fila de runners; Mac Intel
+          # pode usar o binário arm64 via Rosetta ou `cargo build --release`.
 
     steps:
       - name: Checkout
@@ -142,7 +139,6 @@ jobs:
             | Windows x64 | `simlite-windows-x64.zip` |
             | Linux x64 | `simlite-linux-x64.tar.gz` |
             | macOS Apple Silicon | `simlite-macos-arm64.tar.gz` |
-            | macOS Intel | `simlite-macos-x64.tar.gz` |
 
             ### Requisitos
             - **FFmpeg** instalado e no `PATH` (`ffmpeg -version`)

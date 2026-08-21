@@ -23,7 +23,8 @@ Builds oficiais (Windows / Linux / macOS) saem automaticamente a cada tag `v*`:
 | Windows x64 | `simlite-windows-x64.zip` |
 | Linux x64 | `simlite-linux-x64.tar.gz` |
 | macOS Apple Silicon | `simlite-macos-arm64.tar.gz` |
-| macOS Intel | `simlite-macos-x64.tar.gz` |
+
+Em Mac Intel: use Rosetta com o build arm64, ou compile com `cargo build --release`.
 
 Em todas as plataformas é necessário ter o **FFmpeg** no `PATH`.
 
