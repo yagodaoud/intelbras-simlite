@@ -1,10 +1,18 @@
 use crate::domain::Layout;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveProfile {
+    #[default]
+    Quality,
+    Performance,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamKind {
     /// Stream extra (sub) — mosaico leve.
     Extra,
-    /// Stream principal — 1 câmera ou playback.
+    /// Stream principal — qualidade / 1 câmera / playback.
     Main,
 }
 
@@ -23,10 +31,19 @@ pub enum ViewMode {
     Playback,
 }
 
-pub fn stream_for_view(mode: ViewMode, layout: Layout) -> StreamKind {
-    match (mode, layout) {
-        (ViewMode::Playback, _) | (ViewMode::Live, Layout::One) => StreamKind::Main,
-        (ViewMode::Live, _) => StreamKind::Extra,
+pub fn stream_for_view(mode: ViewMode, layout: Layout, profile: LiveProfile) -> StreamKind {
+    match mode {
+        ViewMode::Playback => StreamKind::Main,
+        ViewMode::Live => match profile {
+            LiveProfile::Quality => StreamKind::Main,
+            LiveProfile::Performance => {
+                if layout == Layout::One {
+                    StreamKind::Main
+                } else {
+                    StreamKind::Extra
+                }
+            }
+        },
     }
 }
 
@@ -35,21 +52,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mosaic_uses_substream_single_uses_main() {
+    fn performance_mosaic_uses_substream_quality_uses_main() {
         assert_eq!(
-            stream_for_view(ViewMode::Live, Layout::Four),
+            stream_for_view(ViewMode::Live, Layout::Four, LiveProfile::Performance),
             StreamKind::Extra
         );
         assert_eq!(
-            stream_for_view(ViewMode::Live, Layout::Two),
-            StreamKind::Extra
-        );
-        assert_eq!(
-            stream_for_view(ViewMode::Live, Layout::One),
+            stream_for_view(ViewMode::Live, Layout::Four, LiveProfile::Quality),
             StreamKind::Main
         );
         assert_eq!(
-            stream_for_view(ViewMode::Playback, Layout::Four),
+            stream_for_view(ViewMode::Live, Layout::One, LiveProfile::Performance),
+            StreamKind::Main
+        );
+        assert_eq!(
+            stream_for_view(ViewMode::Playback, Layout::Four, LiveProfile::Performance),
             StreamKind::Main
         );
     }

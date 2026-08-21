@@ -10,6 +10,151 @@ export struct SlotView {
     frame: image,
 }
 
+/// Tile do mosaico com zoom/pan locais (nao quebram o drag a cada frame).
+component MosaicTile inherits Rectangle {
+    in property <image> frame;
+    in property <string> name;
+    in property <bool> live-mode: true;
+    in property <int> index;
+    in property <int> cols: 1;
+    in property <int> slot-count: 1;
+    in property <bool> highlight: false;
+    in property <bool> drop-highlight: false;
+    callback double-clicked();
+    callback begin-drag(int);
+    callback update-drop(int);
+    callback end-drag();
+
+    property <float> zoom: 1.0;
+    property <float> pan-x: 0.0;
+    property <float> pan-y: 0.0;
+    property <bool> panning: false;
+    property <bool> swapping: false;
+    property <float> pan0-x: 0.0;
+    property <float> pan0-y: 0.0;
+    property <float> mouse0-x: 0.0;
+    property <float> mouse0-y: 0.0;
+    property <float> tmp-old-z: 1.0;
+    property <float> tmp-new-z: 1.0;
+    property <float> tmp-pw: 1.0;
+    property <float> tmp-ph: 1.0;
+    property <int> tmp-col: 0;
+    property <int> tmp-row: 0;
+    property <int> tmp-target: 0;
+
+    border-radius: 8px;
+    clip: true;
+    background: #0d1117;
+    border-width: (highlight || drop-highlight) ? 2px : 0px;
+    border-color: drop-highlight ? #3fb950 : #58a6ff;
+
+    Image {
+        source: root.frame;
+        width: parent.width * max(1.0, root.zoom);
+        height: parent.height * max(1.0, root.zoom);
+        x: root.pan-x * 1px;
+        y: root.pan-y * 1px;
+        image-fit: fill;
+    }
+
+    Rectangle {
+        height: 26px;
+        y: parent.height - self.height;
+        background: #00000088;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                text: root.name;
+                color: white;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.live-mode ? "LIVE" : "PLAY";
+                color: root.live-mode ? #3fb950 : #d29922;
+                font-size: 10px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: root.panning ? MouseCursor.grabbing : (root.swapping ? MouseCursor.grabbing : (root.zoom > 1.01 ? MouseCursor.grab : MouseCursor.default));
+        double-clicked => { root.double-clicked(); }
+        scroll-event(event) => {
+            if (event.delta-y != 0) {
+                root.tmp-old-z = max(1.0, root.zoom);
+                root.tmp-new-z = max(1.0, min(4.0, root.tmp-old-z * (event.delta-y < 0 ? 0.85 : 1.18)));
+                root.tmp-pw = root.width / 1px;
+                root.tmp-ph = root.height / 1px;
+                if (root.tmp-new-z <= 1.01 || root.tmp-pw <= 0 || root.tmp-ph <= 0) {
+                    root.zoom = 1.0;
+                    root.pan-x = 0;
+                    root.pan-y = 0;
+                } else {
+                    root.pan-x = max(root.tmp-pw - root.tmp-pw * root.tmp-new-z, min(0, self.mouse-x / 1px - ((self.mouse-x / 1px - root.pan-x) / (root.tmp-pw * root.tmp-old-z)) * root.tmp-pw * root.tmp-new-z));
+                    root.pan-y = max(root.tmp-ph - root.tmp-ph * root.tmp-new-z, min(0, self.mouse-y / 1px - ((self.mouse-y / 1px - root.pan-y) / (root.tmp-ph * root.tmp-old-z)) * root.tmp-ph * root.tmp-new-z));
+                    root.zoom = root.tmp-new-z;
+                }
+            }
+            return EventResult.accept;
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.mouse0-x = self.mouse-x / 1px;
+                root.mouse0-y = self.mouse-y / 1px;
+                if (root.zoom > 1.01) {
+                    root.panning = true;
+                    root.swapping = false;
+                    root.pan0-x = root.pan-x;
+                    root.pan0-y = root.pan-y;
+                } else {
+                    root.panning = false;
+                    root.swapping = true;
+                    root.begin-drag(root.index);
+                    root.update-drop(root.index);
+                }
+            }
+            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                root.end-drag();
+                root.panning = false;
+                root.swapping = false;
+            }
+        }
+        moved => {
+            if (self.pressed && root.panning && root.zoom > 1.01) {
+                root.tmp-pw = root.width / 1px;
+                root.tmp-ph = root.height / 1px;
+                root.pan-x = max(root.tmp-pw - root.tmp-pw * root.zoom, min(0, root.pan0-x + self.mouse-x / 1px - root.mouse0-x));
+                root.pan-y = max(root.tmp-ph - root.tmp-ph * root.zoom, min(0, root.pan0-y + self.mouse-y / 1px - root.mouse0-y));
+            } else if (self.pressed && root.swapping) {
+                // Com pointer capture o up sempre volta pro tile de origem —
+                // calcula o alvo pelo offset do mouse no grid (aceita soltar em qualquer parte do tile).
+                root.tmp-pw = root.width / 1px + 6;
+                root.tmp-ph = root.height / 1px + 6;
+                if (root.tmp-pw > 1 && root.tmp-ph > 1 && root.cols > 0) {
+                    root.tmp-col = mod(root.index, root.cols);
+                    root.tmp-row = (root.index - root.tmp-col) / root.cols;
+                    root.tmp-col = max(0, min(root.cols - 1, root.tmp-col + floor((self.mouse-x / 1px) / root.tmp-pw)));
+                    root.tmp-row = max(0, root.tmp-row + floor((self.mouse-y / 1px) / root.tmp-ph));
+                    root.tmp-target = root.tmp-row * root.cols + root.tmp-col;
+                    if (root.tmp-target >= root.slot-count) {
+                        root.tmp-target = root.slot-count - 1;
+                    }
+                    if (root.tmp-target < 0) {
+                        root.tmp-target = 0;
+                    }
+                    root.update-drop(root.tmp-target);
+                }
+            }
+        }
+    }
+}
+
 export struct DayCell {
     day: int,
     in-month: bool,
@@ -25,6 +170,11 @@ export struct WeekRow {
     d4: DayCell,
     d5: DayCell,
     d6: DayCell,
+}
+
+export struct RecordSeg {
+    start: float,
+    end: float,
 }
 
 component AccentButton inherits Rectangle {
@@ -145,6 +295,14 @@ export component AppWindow inherits Window {
     property <bool> side-dragging: false;
     property <float> side-drag-origin: 168;
     property <float> side-drag-mouse0: 0;
+    in-out property <bool> live-quality: true;
+    in-out property <[RecordSeg]> record-segs;
+    in-out property <float> timeline-zoom: 1.0;
+    property <length> hour-px: max(36px, 48px * timeline-zoom);
+    property <length> day-px: hour-px * 24;
+    property <int> drag-from: -1;
+    property <int> drop-target: -1;
+    property <bool> drag-moved: false;
 
     callback toggle-camera(int);
     callback save-setup();
@@ -158,10 +316,13 @@ export component AppWindow inherits Window {
     callback set-speed(float);
     callback poll-frames();
     callback sidebar-resized(int);
+    callback set-live-quality(bool);
+    callback slot-double-clicked(int);
+    callback slot-swap(int, int);
 
     timer := Timer {
         running: true;
-        interval: 200ms;
+        interval: 100ms;
         triggered => { root.poll-frames(); }
     }
 
@@ -233,30 +394,56 @@ export component AppWindow inherits Window {
                             TouchArea { clicked => { root.toggle-camera(cam.channel); } }
                         }
                     }
+                    Text { text: "MODO LIVE"; color: #6e7681; font-size: 10px; font-weight: 700; }
+                    VerticalLayout {
+                        spacing: 4px;
+                        AccentButton {
+                            text: "Qualidade";
+                            primary: root.live-quality;
+                            clicked => { root.set-live-quality(true); }
+                        }
+                        AccentButton {
+                            text: "Performance";
+                            primary: !root.live-quality;
+                            clicked => { root.set-live-quality(false); }
+                        }
+                    }
                 }
 
                 if !root.live-mode: VerticalLayout {
                     spacing: 8px;
                     vertical-stretch: 1;
-                    Text { text: "CANAL"; color: #6e7681; font-size: 10px; font-weight: 700; }
+                    Text {
+                        text: "CÂMERAS  ·  \{root.layout-n} no grid";
+                        color: #6e7681; font-size: 10px; font-weight: 700;
+                    }
                     VerticalLayout {
                         spacing: 3px;
                         for cam in root.cameras: Rectangle {
                             height: 26px;
                             border-radius: 6px;
-                            background: cam.channel == root.playback-channel ? #d2992222 : #161b22;
+                            background: cam.selected ? #d2992222 : #161b22;
                             border-width: 1px;
-                            border-color: cam.channel == root.playback-channel ? #d2992255 : #21262d;
-                            Text {
-                                text: cam.name;
-                                color: #e6edf3;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                x: 8px;
-                                height: 100%;
-                                overflow: elide;
+                            border-color: cam.selected ? #d2992255 : #21262d;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 7px; height: 7px; y: 9px;
+                                    border-radius: 4px;
+                                    background: cam.selected ? #d29922 : #484f58;
+                                }
+                                Text {
+                                    text: cam.name;
+                                    color: #e6edf3;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
                             }
-                            TouchArea { clicked => { root.playback-channel = cam.channel; } }
+                            TouchArea { clicked => { root.toggle-camera(cam.channel); } }
                         }
                     }
 
@@ -358,56 +545,52 @@ export component AppWindow inherits Window {
                 padding: 10px;
                 spacing: 6px;
 
-                if root.live-mode: Rectangle {
+                // Mosaico ao vivo OU reprodução (mesmo grid)
+                Rectangle {
                     vertical-stretch: 1;
                     background: #05080c;
                     border-radius: 10px;
                     border-width: 1px;
                     border-color: #21262d;
+                    clip: true;
                     GridLayout {
                         padding: 6px;
                         spacing: 6px;
-                        for slot[i] in root.slots: Rectangle {
+                        for slot[i] in root.slots: MosaicTile {
                             row: (i - mod(i, root.cols)) / root.cols;
                             col: mod(i, root.cols);
-                            border-radius: 8px;
-                            clip: true;
-                            background: #0d1117;
-                            // contain = encaixa sem zoom/crop (como o SIM Next no vertical)
-                            Image {
-                                source: slot.frame;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: fill;
+                            frame: slot.frame;
+                            name: slot.name;
+                            live-mode: root.live-mode;
+                            index: i;
+                            cols: root.cols;
+                            slot-count: root.slots.length;
+                            highlight: root.drag-from == i;
+                            drop-highlight: root.drop-target == i && root.drop-target != root.drag-from;
+                            double-clicked => { root.slot-double-clicked(i); }
+                            begin-drag(idx) => {
+                                root.drag-from = idx;
+                                root.drop-target = idx;
+                                root.drag-moved = false;
                             }
-                            Rectangle {
-                                height: 26px;
-                                y: parent.height - self.height;
-                                background: #00000088;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    Text {
-                                        text: slot.name;
-                                        color: white;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: "LIVE";
-                                        color: #3fb950;
-                                        font-size: 10px;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                    }
+                            update-drop(idx) => {
+                                root.drop-target = idx;
+                                if (idx != root.drag-from) {
+                                    root.drag-moved = true;
                                 }
+                            }
+                            end-drag => {
+                                if (root.drag-from >= 0 && root.drop-target >= 0 && root.drop-target != root.drag-from && root.drag-moved) {
+                                    root.slot-swap(root.drag-from, root.drop-target);
+                                }
+                                root.drag-from = -1;
+                                root.drop-target = -1;
+                                root.drag-moved = false;
                             }
                         }
                     }
                     if root.slots.length == 0: Text {
-                        text: "Selecione câmeras à esquerda";
+                        text: root.live-mode ? "Selecione câmeras à esquerda" : "Selecione câmeras e abra a reprodução";
                         color: #484f58;
                         font-size: 14px;
                         horizontal-alignment: center;
@@ -418,69 +601,136 @@ export component AppWindow inherits Window {
                 }
 
                 if !root.live-mode: VerticalLayout {
-                    vertical-stretch: 1;
-                    spacing: 10px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        Text {
+                            text: "TIMELINE  ·  \{root.play-time-label}  ·  \{root.play-camera-name}";
+                            color: #8b949e; font-size: 11px; font-weight: 700;
+                            vertical-alignment: center; horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        IconButton {
+                            text: "−";
+                            clicked => { root.timeline-zoom = max(1.0, root.timeline-zoom - 0.5); }
+                        }
+                        IconButton {
+                            text: "+";
+                            clicked => { root.timeline-zoom = min(8.0, root.timeline-zoom + 0.5); }
+                        }
+                        IconButton { text: "0.5x"; active: root.play-speed < 0.75; clicked => { root.set-speed(0.5); } }
+                        IconButton { text: "1x"; active: root.play-speed > 0.75 && root.play-speed < 1.5; clicked => { root.set-speed(1.0); } }
+                        IconButton { text: "2x"; active: root.play-speed > 1.5 && root.play-speed < 3.0; clicked => { root.set-speed(2.0); } }
+                        IconButton { text: "4x"; active: root.play-speed > 3.0; clicked => { root.set-speed(4.0); } }
+                    }
                     Rectangle {
-                        vertical-stretch: 1;
-                        background: #05080c;
-                        border-radius: 10px;
+                        height: 92px;
+                        border-radius: 8px;
+                        background: #0d1117;
                         border-width: 1px;
                         border-color: #21262d;
                         clip: true;
-                        Image {
-                            source: root.play-frame;
+                        Flickable {
                             width: 100%;
                             height: 100%;
-                            image-fit: fill;
-                        }
-                        Rectangle {
-                            height: 32px;
-                            y: parent.height - self.height;
-                            background: #00000099;
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                Text {
-                                    text: root.play-camera-name;
-                                    color: white; font-size: 13px; font-weight: 600;
-                                    vertical-alignment: center; horizontal-stretch: 1;
-                                }
-                                Text {
-                                    text: "PLAY  \{root.play-range-label}";
-                                    color: #d29922; font-size: 11px; font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
+                            viewport-width: root.day-px;
+                            viewport-height: 92px;
+                            interactive: true;
 
-                    VerticalLayout {
-                        spacing: 6px;
-                        Rectangle {
-                            height: 18px;
-                            border-radius: 9px;
-                            background: #161b22;
                             Rectangle {
-                                width: parent.width * root.play-progress;
-                                height: 100%;
-                                border-radius: 9px;
-                                background: #d29922;
-                            }
-                            TouchArea {
-                                clicked => {
-                                    if (self.width > 0) {
-                                        root.seek-playback(self.mouse-x / self.width);
+                                width: root.day-px;
+                                height: 92px;
+                                background: #0d1117;
+
+                                HorizontalLayout {
+                                    y: 0px;
+                                    height: 100%;
+                                    spacing: 0px;
+                                    for h in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]: Rectangle {
+                                        width: root.hour-px;
+                                        height: 100%;
+                                        Text {
+                                            text: "\{h}:00";
+                                            color: #6e7681;
+                                            font-size: 10px;
+                                            x: 4px;
+                                            y: 6px;
+                                        }
+                                        Rectangle {
+                                            x: parent.width - 1px;
+                                            width: 1px;
+                                            height: 100%;
+                                            background: #21262d;
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    y: 28px;
+                                    x: 0px;
+                                    width: root.day-px;
+                                    height: 36px;
+                                    background: #161b22;
+                                    border-radius: 4px;
+                                    for seg in root.record-segs: Rectangle {
+                                        x: root.day-px * seg.start;
+                                        width: max(2px, root.day-px * (seg.end - seg.start));
+                                        height: 100%;
+                                        background: #238636;
+                                        border-radius: 4px;
+                                        opacity: 0.85;
+                                    }
+                                }
+
+                                Rectangle {
+                                    x: max(0px, root.day-px * root.play-progress - 1px);
+                                    width: 2px;
+                                    height: 100%;
+                                    background: #f0f6fc;
+                                }
+                                Rectangle {
+                                    x: max(0px, min(root.day-px - 64px, root.day-px * root.play-progress - 32px));
+                                    y: 66px;
+                                    width: 64px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: #21262d;
+                                    Text {
+                                        text: root.play-time-label;
+                                        color: #e6edf3;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+
+                                TouchArea {
+                                    width: root.day-px;
+                                    height: 100%;
+                                    clicked => {
+                                        if (root.day-px > 0) {
+                                            root.seek-playback((self.mouse-x / root.day-px));
+                                        }
+                                    }
+                                    scroll-event(event) => {
+                                        // scroll up = afastar (ver mais), down = aproximar
+                                        if (event.delta-y < 0) {
+                                            root.timeline-zoom = max(1.0, root.timeline-zoom - 0.5);
+                                        } else if (event.delta-y > 0) {
+                                            root.timeline-zoom = min(8.0, root.timeline-zoom + 0.5);
+                                        }
+                                        return EventResult.accept;
                                     }
                                 }
                             }
                         }
-                        HorizontalLayout {
-                            Text { text: root.play-time-label; color: #c9d1d9; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                            IconButton { text: "0.5x"; active: root.play-speed < 0.75; clicked => { root.set-speed(0.5); } }
-                            IconButton { text: "1x"; active: root.play-speed > 0.75 && root.play-speed < 1.5; clicked => { root.set-speed(1.0); } }
-                            IconButton { text: "2x"; active: root.play-speed > 1.5 && root.play-speed < 3.0; clicked => { root.set-speed(2.0); } }
-                            IconButton { text: "4x"; active: root.play-speed > 3.0; clicked => { root.set-speed(4.0); } }
-                        }
+                    }
+                    Text {
+                        text: root.play-range-label;
+                        color: #6e7681;
+                        font-size: 11px;
                     }
                 }
 

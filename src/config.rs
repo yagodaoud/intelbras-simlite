@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Camera, Channel, Device, DomainError, Layout, Mosaic};
+use crate::domain::{Camera, Channel, Device, DomainError, Layout, LiveProfile, Mosaic};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
@@ -35,6 +35,10 @@ pub struct MosaicFile {
     pub selected: Vec<u8>,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    /// Qualidade (padrão) = stream principal + mais FPS/resolução.
+    /// Performance = substream e decode leve no mosaico.
+    #[serde(default)]
+    pub live_profile: LiveProfile,
 }
 
 fn default_sidebar_width() -> u32 {
@@ -65,6 +69,7 @@ impl AppConfig {
                 layout: Layout::Four,
                 selected: vec![1, 2, 3, 4],
                 sidebar_width: 168,
+                live_profile: LiveProfile::Quality,
             },
         })
     }

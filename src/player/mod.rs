@@ -27,7 +27,8 @@ pub struct DecodeOpts {
 }
 
 impl DecodeOpts {
-    pub fn mosaic() -> Self {
+    /// Live mosaico — modo performance (leve).
+    pub fn mosaic_perf() -> Self {
         Self {
             width: 320,
             height: 180,
@@ -38,7 +39,20 @@ impl DecodeOpts {
         }
     }
 
-    pub fn focused() -> Self {
+    /// Live mosaico — modo qualidade.
+    pub fn mosaic_quality() -> Self {
+        Self {
+            width: 640,
+            height: 360,
+            fps: 12,
+            hwaccel: true,
+            low_latency: true,
+            speed: 1.0,
+        }
+    }
+
+    /// Live 1 câmera — performance.
+    pub fn focused_perf() -> Self {
         Self {
             width: 640,
             height: 360,
@@ -49,14 +63,47 @@ impl DecodeOpts {
         }
     }
 
-    pub fn playback(speed: f32) -> Self {
+    /// Live 1 câmera — qualidade.
+    pub fn focused_quality() -> Self {
         Self {
-            width: 640,
-            height: 360,
-            fps: 10,
+            width: 1280,
+            height: 720,
+            fps: 20,
+            hwaccel: true,
+            low_latency: true,
+            speed: 1.0,
+        }
+    }
+
+    pub fn mosaic() -> Self {
+        Self::mosaic_perf()
+    }
+
+    pub fn focused() -> Self {
+        Self::focused_perf()
+    }
+
+    /// Playback do HD. Em velocidade ≠ 1 o app faz seek-jump (RTSP não acelera de verdade);
+    /// setpts só para 0.5x (slow-mo local).
+    pub fn playback(speed: f32) -> Self {
+        let speed = if speed <= 0.0 { 1.0 } else { speed };
+        let use_setpts = (speed - 1.0).abs() > 0.01 && speed < 1.0;
+        let fps = if speed < 1.0 {
+            24
+        } else if (speed - 1.0).abs() < 0.01 {
+            24
+        } else {
+            // Seek-jump mode: decode a bit higher for smoother snaps
+            30
+        };
+        Self {
+            width: 1280,
+            height: 720,
+            fps,
             hwaccel: true,
             low_latency: false,
-            speed: if speed <= 0.0 { 1.0 } else { speed },
+            // Só aplica setpts no slow-mo; 2x/4x usam seek no main.rs
+            speed: if use_setpts { speed } else { 1.0 },
         }
     }
 
@@ -107,7 +154,11 @@ impl FfmpegPlan {
                 }
                 before.extend([
                     "-threads".into(),
-                    "1".into(),
+                    if opts.low_latency {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    },
                     "-rtsp_transport".into(),
                     "tcp".into(),
                 ]);
@@ -313,8 +364,11 @@ fn spawn_worker(source: InputSource, opts: DecodeOpts) -> SlotWorker {
     let latest_t = latest.clone();
     let gen_t = generation.clone();
     let join = thread::spawn(move || {
+        // Prioridade baixa só no live low-latency; playback/qualidade usam mais CPU.
         #[cfg(windows)]
-        windows_set_below_normal_priority();
+        if opts.low_latency {
+            windows_set_below_normal_priority();
+        }
         let mut attempt_hw = opts.hwaccel;
         loop {
             if stop_t.load(Ordering::SeqCst) {
@@ -379,6 +433,17 @@ fn windows_set_below_normal_priority() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_fps_scales_with_speed_for_smooth_seek() {
+        assert_eq!(DecodeOpts::playback(1.0).fps, 24);
+        assert_eq!(DecodeOpts::playback(1.0).speed, 1.0);
+        // 2x/4x: sem setpts (seek-jump no app); slow-mo usa setpts
+        assert_eq!(DecodeOpts::playback(2.0).speed, 1.0);
+        assert_eq!(DecodeOpts::playback(4.0).speed, 1.0);
+        assert!((DecodeOpts::playback(0.5).speed - 0.5).abs() < 0.01);
+        assert_eq!(DecodeOpts::playback(1.0).width, 1280);
+    }
 
     #[test]
     fn live_plan_uses_tcp_hwaccel_and_substream_scale() {

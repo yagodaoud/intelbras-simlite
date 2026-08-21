@@ -75,6 +75,45 @@ impl Mosaic {
         Ok(session_diff(&old, &self.selected))
     }
 
+    /// Remove a câmera no índice do mosaico (duplo clique no tile).
+    pub fn remove_at(&mut self, index: usize) -> Result<SessionDiff, DomainError> {
+        if index >= self.selected.len() {
+            return Err(DomainError::UnknownCamera);
+        }
+        let old = self.selected.clone();
+        self.selected.remove(index);
+        self.sync_layout();
+        Ok(session_diff(&old, &self.selected))
+    }
+
+    /// Insere (ou move) a câmera no índice do slot vago; se já selecionada, só reordena.
+    pub fn place_at(&mut self, channel: Channel, index: usize) -> Result<SessionDiff, DomainError> {
+        self.ensure_known(channel)?;
+        let old = self.selected.clone();
+        if let Some(cur) = self.selected.iter().position(|c| *c == channel) {
+            let ch = self.selected.remove(cur);
+            let at = index.min(self.selected.len());
+            self.selected.insert(at, ch);
+        } else if self.selected.len() < self.max_selectable() {
+            let at = index.min(self.selected.len());
+            self.selected.insert(at, channel);
+        } else {
+            let at = index.min(self.selected.len().saturating_sub(1));
+            self.selected[at] = channel;
+        }
+        self.sync_layout();
+        Ok(session_diff(&old, &self.selected))
+    }
+
+    /// Troca duas posições do mosaico (arrastar tile).
+    pub fn swap_slots(&mut self, a: usize, b: usize) -> Result<(), DomainError> {
+        if a >= self.selected.len() || b >= self.selected.len() {
+            return Err(DomainError::UnknownCamera);
+        }
+        self.selected.swap(a, b);
+        Ok(())
+    }
+
     pub fn select_only(&mut self, channels: &[Channel]) -> Result<SessionDiff, DomainError> {
         for ch in channels {
             self.ensure_known(*ch)?;
@@ -184,6 +223,23 @@ mod tests {
             vec![1, 3]
         );
         assert_eq!(mosaic.layout(), Layout::Two);
+    }
+
+    #[test]
+    fn place_at_fills_vacant_slot_and_swap_reorders() {
+        let mut mosaic = Mosaic::new(Layout::One, six_cameras());
+        mosaic.select_only(&[ch(1), ch(2), ch(3)]).unwrap();
+        mosaic.remove_at(1).unwrap(); // remove cam 2 → [1, 3]
+        mosaic.place_at(ch(5), 1).unwrap(); // [1, 5, 3]
+        assert_eq!(
+            mosaic.selected().iter().map(|c| c.get()).collect::<Vec<_>>(),
+            vec![1, 5, 3]
+        );
+        mosaic.swap_slots(0, 2).unwrap();
+        assert_eq!(
+            mosaic.selected().iter().map(|c| c.get()).collect::<Vec<_>>(),
+            vec![3, 5, 1]
+        );
     }
 
     #[test]

@@ -21,4 +21,4 @@ pub use playback::{
     PlaybackSession,
 };
 pub use sessions::{session_diff, SessionDiff};
-pub use stream::{stream_for_view, StreamKind, ViewMode};
+pub use stream::{stream_for_view, LiveProfile, StreamKind, ViewMode};

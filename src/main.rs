@@ -6,8 +6,8 @@ use std::time::Instant;
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime};
 use simlite::config::{self, AppConfig, CameraFile};
 use simlite::domain::{
-    day_range, month_cells, shift_month, stream_for_view, Channel, Device, Layout, Mosaic,
-    PlaybackSession, SessionDiff, ViewMode,
+    day_range, month_cells, shift_month, stream_for_view, Channel, Device, Layout, LiveProfile,
+    Mosaic, PlaybackQuery, PlaybackSession, SessionDiff, ViewMode,
 };
 use simlite::intelbras;
 use simlite::player::{DecodeOpts, PlayerHub, RgbFrame};
@@ -25,6 +25,8 @@ struct State {
     playback: Option<PlaybackSession>,
     playback_tick: Option<Instant>,
     playback_waiting: bool,
+    /// Índice do tile removido por duplo clique; próxima câmera escolhida preenche aqui.
+    vacant_slot: Option<usize>,
     last_ui_gen: std::collections::HashMap<u8, u64>,
     cal_year: i32,
     cal_month: u32,
@@ -80,6 +82,7 @@ fn main() {
     ui.set_layout_n(layout_n(mosaic.layout()));
     let side = config.mosaic.sidebar_width.clamp(120, 280);
     ui.set_side_width_px(side as f32);
+    ui.set_live_quality(config.mosaic.live_profile == LiveProfile::Quality);
     ui.set_playback_channel(
         mosaic
             .selected()
@@ -101,6 +104,7 @@ fn main() {
         playback: None,
         playback_tick: None,
         playback_waiting: false,
+        vacant_slot: None,
         last_ui_gen: std::collections::HashMap::new(),
         cal_year: today.year(),
         cal_month: today.month(),
@@ -114,7 +118,7 @@ fn main() {
         refresh_slots(&ui, &mut st);
         if st.secret.is_some() {
             restart_live(&mut st);
-            ui.set_status("Ao vivo · stream extra no mosaico".into());
+            ui.set_status(live_status(&st));
             ui.set_live_mode(true);
         }
     }
@@ -128,6 +132,7 @@ fn main() {
             {
                 if st.mode == ViewMode::Playback {
                     advance_playback(&mut st, &ui);
+                    refresh_slots(&ui, &mut st);
                     refresh_playback_ui(&ui, &mut st);
                 } else {
                     refresh_slots(&ui, &mut st);
@@ -145,6 +150,26 @@ fn main() {
         }
     });
 
+    ui.on_set_live_quality({
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        move |quality| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Ok(mut st) = state.lock() else { return };
+            st.config.mosaic.live_profile = if quality {
+                LiveProfile::Quality
+            } else {
+                LiveProfile::Performance
+            };
+            let _ = config::save(&st.path, &st.config);
+            ui.set_live_quality(quality);
+            if st.mode == ViewMode::Live && st.secret.is_some() {
+                restart_live(&mut st);
+                ui.set_status(live_status(&st));
+            }
+        }
+    });
+
     ui.on_toggle_camera({
         let state = state.clone();
         let ui_weak = ui.as_weak();
@@ -152,7 +177,14 @@ fn main() {
             let Some(ui) = ui_weak.upgrade() else { return };
             let Ok(mut st) = state.lock() else { return };
             let Ok(ch) = Channel::new(channel as u8) else { return };
-            let Ok(diff) = st.mosaic.toggle(ch) else { return };
+            let vacant = st.vacant_slot.take();
+            let Ok(diff) = (if let Some(idx) = vacant {
+                st.mosaic.place_at(ch, idx)
+            } else {
+                st.mosaic.toggle(ch)
+            }) else {
+                return;
+            };
             let mosaic = st.mosaic.clone();
             st.config.sync_from_mosaic(&mosaic);
             let _ = config::save(&st.path, &st.config);
@@ -160,9 +192,59 @@ fn main() {
             if st.mode == ViewMode::Live {
                 st.live_selected = st.mosaic.selected().to_vec();
                 apply_diff(&mut st, diff);
+                refresh_slots(&ui, &mut st);
+            } else if st.playback.is_some() {
+                st.playback_tick = Some(Instant::now());
+                st.playback_waiting = true;
+                let _ = start_playback_stream(&mut st);
+                refresh_slots(&ui, &mut st);
             }
             refresh_cameras(&ui, &st.mosaic);
             ui.set_status(format!("{} câmera(s) · grid automático", st.mosaic.selected().len()).into());
+        }
+    });
+
+    ui.on_slot_double_clicked({
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        move |index| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Ok(mut st) = state.lock() else { return };
+            let idx = index as usize;
+            let Ok(diff) = st.mosaic.remove_at(idx) else { return };
+            st.vacant_slot = Some(idx.min(st.mosaic.selected().len()));
+            let mosaic = st.mosaic.clone();
+            st.config.sync_from_mosaic(&mosaic);
+            let _ = config::save(&st.path, &st.config);
+            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            if st.mode == ViewMode::Live {
+                st.live_selected = st.mosaic.selected().to_vec();
+                apply_diff(&mut st, diff);
+            } else if st.playback.is_some() {
+                apply_playback_diff(&mut st, &diff);
+            }
+            refresh_cameras(&ui, &st.mosaic);
+            refresh_slots(&ui, &mut st);
+            ui.set_status("Slot vago — clique numa câmera pra preencher".into());
+        }
+    });
+
+    ui.on_slot_swap({
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
+        move |from, to| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Ok(mut st) = state.lock() else { return };
+            if st.mosaic.swap_slots(from as usize, to as usize).is_err() {
+                return;
+            }
+            st.vacant_slot = None;
+            let mosaic = st.mosaic.clone();
+            st.config.sync_from_mosaic(&mosaic);
+            let _ = config::save(&st.path, &st.config);
+            refresh_cameras(&ui, &st.mosaic);
+            refresh_slots(&ui, &mut st);
+            ui.set_status("Ordem do mosaico salva".into());
         }
     });
 
@@ -225,7 +307,7 @@ fn main() {
                     ui.set_device_name(st.config.device.name.clone().into());
                     ui.set_layout_n(layout_n(st.mosaic.layout()));
                     refresh_cameras(&ui, &st.mosaic);
-                    ui.set_status("Conectado · mosaico ao vivo".into());
+                    ui.set_status(live_status(&st));
                 }
                 Err(err) => ui.set_status(err.to_string().into()),
             }
@@ -248,7 +330,7 @@ fn main() {
             ui.set_live_mode(true);
             ui.set_layout_n(layout_n(st.mosaic.layout()));
             refresh_cameras(&ui, &st.mosaic);
-            ui.set_status("Ao vivo".into());
+            ui.set_status(live_status(&st));
         }
     });
 
@@ -313,17 +395,24 @@ fn main() {
         let ui_weak = ui.as_weak();
         move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let channel = ui.get_playback_channel();
             let Ok(mut st) = state.lock() else { return };
-            let Ok(ch) = Channel::new(channel as u8) else {
-                ui.set_status("Canal inválido".into());
+            if st.mosaic.selected().is_empty() {
+                let channel = ui.get_playback_channel();
+                let Ok(ch) = Channel::new(channel as u8) else {
+                    ui.set_status("Selecione ao menos uma câmera".into());
+                    return;
+                };
+                let _ = st.mosaic.select_only(&[ch]);
+            }
+            let Some(first) = st.mosaic.selected().first().copied() else {
+                ui.set_status("Selecione ao menos uma câmera".into());
                 return;
             };
             let Ok((start, end)) = day_range(st.cal_selected, 0, 0) else {
                 ui.set_status("Data inválida".into());
                 return;
             };
-            let Ok(session) = PlaybackSession::new(ch, start, end) else {
+            let Ok(session) = PlaybackSession::new(first, start, end) else {
                 ui.set_status("Intervalo inválido".into());
                 return;
             };
@@ -334,14 +423,18 @@ fn main() {
             st.playback = Some(session);
             st.playback_tick = Some(Instant::now());
             st.playback_waiting = true;
+            st.vacant_slot = None;
             if let Err(err) = start_playback_stream(&mut st) {
                 ui.set_status(err.into());
                 return;
             }
             ui.set_live_mode(false);
             ui.set_play_has_video(false);
+            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            refresh_cameras(&ui, &st.mosaic);
+            refresh_slots(&ui, &mut st);
             refresh_playback_ui(&ui, &mut st);
-            ui.set_status("Reproduzindo desde 00:00 · se ficar preto, arraste a barra".into());
+            ui.set_status("Reproduzindo · grid como no ao vivo".into());
         }
     });
 
@@ -362,6 +455,7 @@ fn main() {
                 return;
             }
             ui.set_play_has_video(false);
+            refresh_slots(&ui, &mut st);
             refresh_playback_ui(&ui, &mut st);
             ui.set_status("Seek no HD do DVR".into());
         }
@@ -376,6 +470,7 @@ fn main() {
             let Some(session) = st.playback.as_mut() else { return };
             session.set_speed(speed);
             let speed_now = session.speed;
+            // Reinicia o tick sem avançar: evita "pulo" ao voltar de 4x → 1x
             st.playback_tick = Some(Instant::now());
             st.playback_waiting = true;
             ui.set_play_speed(speed_now);
@@ -384,7 +479,9 @@ fn main() {
                 return;
             }
             ui.set_play_has_video(false);
+            refresh_slots(&ui, &mut st);
             refresh_playback_ui(&ui, &mut st);
+            ui.set_status(format!("Velocidade {speed_now}x").into());
         }
     });
 
@@ -415,6 +512,13 @@ fn rebuild_cameras(cfg: &mut AppConfig, count: u8) {
         .collect();
 }
 
+fn live_status(st: &State) -> slint::SharedString {
+    match st.config.mosaic.live_profile {
+        LiveProfile::Quality => "Ao vivo · qualidade (stream principal)".into(),
+        LiveProfile::Performance => "Ao vivo · performance (substream)".into(),
+    }
+}
+
 fn layout_n(layout: Layout) -> i32 {
     match layout {
         Layout::One => 1,
@@ -424,11 +528,15 @@ fn layout_n(layout: Layout) -> i32 {
     }
 }
 
-fn decode_opts(layout: Layout, mode: ViewMode, speed: f32) -> DecodeOpts {
-    match (mode, layout) {
-        (ViewMode::Playback, _) => DecodeOpts::playback(speed),
-        (ViewMode::Live, Layout::One) => DecodeOpts::focused(),
-        (ViewMode::Live, _) => DecodeOpts::mosaic(),
+fn decode_opts(layout: Layout, mode: ViewMode, profile: LiveProfile, speed: f32) -> DecodeOpts {
+    match mode {
+        ViewMode::Playback => DecodeOpts::playback(speed),
+        ViewMode::Live => match (profile, layout) {
+            (LiveProfile::Quality, Layout::One) => DecodeOpts::focused_quality(),
+            (LiveProfile::Quality, _) => DecodeOpts::mosaic_quality(),
+            (LiveProfile::Performance, Layout::One) => DecodeOpts::focused_perf(),
+            (LiveProfile::Performance, _) => DecodeOpts::mosaic_perf(),
+        },
     }
 }
 
@@ -455,8 +563,9 @@ fn apply_diff(st: &mut State, diff: SessionDiff) {
     }
     let Some(secret) = st.secret.as_ref() else { return };
     let Ok(device) = st.config.device() else { return };
-    let kind = stream_for_view(st.mode, st.mosaic.layout());
-    let opts = decode_opts(st.mosaic.layout(), st.mode, 1.0);
+    let profile = st.config.mosaic.live_profile;
+    let kind = stream_for_view(st.mode, st.mosaic.layout(), profile);
+    let opts = decode_opts(st.mosaic.layout(), st.mode, profile, 1.0);
     for ch in diff.start {
         if st.mode != ViewMode::Live {
             continue;
@@ -470,28 +579,60 @@ fn start_playback_stream(st: &mut State) -> Result<(), &'static str> {
     let secret = st.secret.as_ref().ok_or("Salve a senha do DVR primeiro")?;
     let device = st.config.device().map_err(|_| "Dispositivo inválido")?;
     let session = st.playback.as_ref().ok_or("Sem sessão de reprodução")?;
-    let query = session.query_from_position().map_err(|_| "Intervalo inválido")?;
     let speed = session.speed;
-    let channel = session.channel;
-    let url = intelbras::playback_url(&device, secret, &query);
+    let position = session.position;
+    let range_end = session.range_end;
+    let channels: Vec<Channel> = {
+        let sel = st.mosaic.selected().to_vec();
+        if sel.is_empty() {
+            vec![session.channel]
+        } else {
+            sel
+        }
+    };
+    if channels.is_empty() {
+        return Err("Selecione ao menos uma câmera");
+    }
     st.hub.stop_all();
     st.last_ui_gen.clear();
-    st.hub
-        .start_rtsp(channel, &url, DecodeOpts::playback(speed));
+    let opts = DecodeOpts::playback(speed);
+    for ch in channels {
+        let query = PlaybackQuery::new(ch, position, range_end).map_err(|_| "Intervalo inválido")?;
+        let url = intelbras::playback_url(&device, secret, &query);
+        st.hub.start_rtsp(ch, &url, opts);
+    }
     Ok(())
+}
+
+fn apply_playback_diff(st: &mut State, diff: &SessionDiff) {
+    for ch in &diff.stop {
+        st.hub.stop(*ch);
+        st.last_ui_gen.remove(&ch.get());
+    }
+    if st.playback.is_none() {
+        return;
+    }
+    let _ = start_playback_stream(st);
 }
 
 fn advance_playback(st: &mut State, ui: &AppWindow) {
     let Some(session) = st.playback.as_ref() else { return };
-    let channel = session.channel;
-    let frame_gen = st.hub.generation(channel);
-    if frame_gen == 0 {
+    let channels: Vec<Channel> = {
+        let sel = st.mosaic.selected().to_vec();
+        if sel.is_empty() {
+            vec![session.channel]
+        } else {
+            sel
+        }
+    };
+    let any_frame = channels.iter().any(|ch| st.hub.generation(*ch) > 0);
+    if !any_frame {
         if st.playback_waiting {
             if let Some(started) = st.playback_tick {
                 if started.elapsed().as_secs() >= 3 {
                     st.playback_waiting = false;
                     ui.set_status(
-                        "Sem vídeo neste horário (pode não haver gravação). Arraste a barra."
+                        "Sem vídeo neste horário (pode não haver gravação). Clique na timeline."
                             .into(),
                     );
                 }
@@ -502,17 +643,30 @@ fn advance_playback(st: &mut State, ui: &AppWindow) {
     st.playback_waiting = false;
     let Some(tick) = st.playback_tick else { return };
     let elapsed = tick.elapsed();
-    if elapsed.as_millis() < 250 {
+    let speed = session.speed;
+
+    // 2x/4x: RTSP do DVR não acelera de verdade — avança o relógio e faz seek-jump.
+    // Assim 4x é ~4x no conteúdo e voltar p/ 1x não "pula" o que o setpts inventava.
+    let jump = speed > 1.05;
+    let min_ms = if jump { 350 } else { 250 };
+    if elapsed.as_millis() < min_ms {
         return;
     }
     let chrono_elapsed = chrono::Duration::milliseconds(elapsed.as_millis() as i64);
-    if let Some(session) = st.playback.as_mut() {
+    let finished = {
+        let Some(session) = st.playback.as_mut() else { return };
         session.advance(chrono_elapsed);
-        if session.finished() {
-            st.hub.stop_all();
-        }
-    }
+        session.finished()
+    };
     st.playback_tick = Some(Instant::now());
+    if finished {
+        st.hub.stop_all();
+        return;
+    }
+    if jump {
+        st.playback_waiting = true;
+        let _ = start_playback_stream(st);
+    }
 }
 
 fn refresh_cameras(ui: &AppWindow, mosaic: &Mosaic) {
@@ -529,20 +683,47 @@ fn refresh_cameras(ui: &AppWindow, mosaic: &Mosaic) {
 }
 
 fn refresh_slots(ui: &AppWindow, st: &mut State) {
-    let slots = st.mosaic.slots();
-    let mut dirty = slots.len() != st.last_ui_gen.len();
-    for slot in &slots {
-        let frame_gen = st.hub.generation(slot.camera.channel);
-        if st.last_ui_gen.get(&slot.camera.channel.get()).copied() != Some(frame_gen) {
-            dirty = true;
-            break;
+    refresh_slots_inner(ui, st, false);
+}
+
+fn refresh_slots_inner(ui: &AppWindow, st: &mut State, force: bool) {
+    use slint::Model;
+
+    let mosaic_slots = st.mosaic.slots();
+    let model = ui.get_slots();
+
+    // Atualiza frames no lugar — preserva MosaicTile (zoom/pan/gesto de drag).
+    if !force && model.row_count() == mosaic_slots.len() {
+        let mut any = false;
+        for (i, slot) in mosaic_slots.iter().enumerate() {
+            let ch = slot.camera.channel.get();
+            let frame_gen = st.hub.generation(slot.camera.channel);
+            let gen_changed = st.last_ui_gen.get(&ch).copied() != Some(frame_gen);
+            let Some(mut row) = model.row_data(i) else { continue };
+            let identity_changed = row.channel != i32::from(ch);
+            if !gen_changed && !identity_changed {
+                continue;
+            }
+            st.last_ui_gen.insert(ch, frame_gen);
+            row.channel = i32::from(ch);
+            row.name = slot.camera.name.clone().into();
+            row.frame = st
+                .hub
+                .latest(slot.camera.channel)
+                .map(|f| frame_to_image(&f))
+                .unwrap_or_default();
+            model.set_row_data(i, row);
+            any = true;
         }
-    }
-    if !dirty {
+        if any || mosaic_slots.is_empty() {
+            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            return;
+        }
         ui.set_layout_n(layout_n(st.mosaic.layout()));
         return;
     }
-    let items: Vec<SlotView> = slots
+
+    let items: Vec<SlotView> = mosaic_slots
         .into_iter()
         .map(|slot| {
             let ch = slot.camera.channel.get();
@@ -559,7 +740,6 @@ fn refresh_slots(ui: &AppWindow, st: &mut State) {
             }
         })
         .collect();
-    // Drop gens for cameras no longer shown.
     st.last_ui_gen
         .retain(|ch, _| items.iter().any(|s| s.channel as u8 == *ch));
     ui.set_slots(ModelRc::new(VecModel::from(items)));
@@ -598,11 +778,23 @@ fn refresh_playback_ui(ui: &AppWindow, st: &mut State) {
     let Some(session) = st.playback.as_ref() else {
         ui.set_play_progress(0.0);
         ui.set_play_has_video(false);
+        ui.set_record_segs(ModelRc::new(VecModel::<RecordSeg>::from(vec![])));
         return;
     };
-    let channel = session.channel;
-    let frame_gen = st.hub.generation(channel);
-    let has_video = frame_gen > 0;
+    // Sem CGI confiável: assume presença contínua no dia (barra verde estilo SIM Next).
+    ui.set_record_segs(ModelRc::new(VecModel::from(vec![RecordSeg {
+        start: 0.0,
+        end: 1.0,
+    }])));
+    let channels: Vec<Channel> = {
+        let sel = st.mosaic.selected().to_vec();
+        if sel.is_empty() {
+            vec![session.channel]
+        } else {
+            sel
+        }
+    };
+    let has_video = channels.iter().any(|ch| st.hub.generation(*ch) > 0);
     ui.set_play_has_video(has_video);
     ui.set_play_progress(session.progress());
     ui.set_play_speed(session.speed);
@@ -615,23 +807,19 @@ fn refresh_playback_ui(ui: &AppWindow, st: &mut State) {
         )
         .into(),
     );
-    ui.set_playback_channel(i32::from(channel.get()));
-    let name = st
-        .mosaic
-        .camera(channel)
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| format!("Canal {}", channel));
-    ui.set_play_camera_name(name.into());
-    let prev = st.last_ui_gen.get(&channel.get()).copied().unwrap_or(0);
-    if frame_gen != prev {
-        st.last_ui_gen.insert(channel.get(), frame_gen);
-        ui.set_play_frame(
-            st.hub
-                .latest(channel)
-                .map(|f| frame_to_image(&f))
-                .unwrap_or_default(),
-        );
+    if let Some(first) = channels.first() {
+        ui.set_playback_channel(i32::from(first.get()));
+        let name = if channels.len() > 1 {
+            format!("{} câmeras", channels.len())
+        } else {
+            st.mosaic
+                .camera(*first)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| format!("Canal {}", first.get()))
+        };
+        ui.set_play_camera_name(name.into());
     }
+    ui.set_layout_n(layout_n(st.mosaic.layout()));
 }
 
 fn month_title(year: i32, month: u32) -> String {
