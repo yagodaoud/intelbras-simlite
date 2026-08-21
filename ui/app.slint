@@ -258,6 +258,7 @@ component Field inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "SIM Lite";
+    icon: @image-url("assets/simlite-icon-256.png");
     min-width: 900px;
     min-height: 640px;
     preferred-width: 1280px;
@@ -337,11 +338,12 @@ export component AppWindow inherits Window {
                 spacing: 8px;
 
                 HorizontalLayout {
-                    spacing: 6px;
-                    Rectangle {
-                        width: 7px; height: 7px; y: 5px;
-                        border-radius: 4px;
-                        background: root.live-mode ? #3fb950 : #d29922;
+                    spacing: 8px;
+                    Image {
+                        source: @image-url("assets/simlite-icon-64.png");
+                        width: 28px;
+                        height: 28px;
+                        image-fit: contain;
                     }
                     VerticalLayout {
                         Text { text: "SIM Lite"; color: #e6edf3; font-size: 14px; font-weight: 700; }
@@ -754,7 +756,24 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 24px;
                 spacing: 10px;
-                Text { text: "Conectar ao DVR"; color: #e6edf3; font-size: 20px; font-weight: 700; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Image {
+                        source: @image-url("assets/simlite-icon-64.png");
+                        width: 40px;
+                        height: 40px;
+                        image-fit: contain;
+                    }
+                    VerticalLayout {
+                        Text { text: "Conectar ao DVR"; color: #e6edf3; font-size: 20px; font-weight: 700; }
+                        Text {
+                            text: "SIM Lite";
+                            color: #3fb950;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+                    }
+                }
                 Text {
                     text: "A senha vai para o Credential Manager do Windows. Porta web só é necessária se listar arquivos; reprodução usa RTSP.";
                     color: #8b949e;

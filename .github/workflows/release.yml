@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão sem o v (ex.: 0.1.0)"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            artifact: simlite-windows-x64
+            bin: simlite.exe
+            archive: zip
+          - name: linux-x64
+            os: ubuntu-22.04
+            artifact: simlite-linux-x64
+            bin: simlite
+            archive: tar
+          - name: macos-arm64
+            os: macos-14
+            artifact: simlite-macos-arm64
+            bin: simlite
+            archive: tar
+          - name: macos-x64
+            os: macos-13
+            artifact: simlite-macos-x64
+            bin: simlite
+            archive: tar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Linux dependencies (Slint)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev \
+            libxcb-render-util0-dev libxcb-icccm4-dev libxcb-image0-dev \
+            libxcb-keysyms1-dev libxcb-randr0-dev libxcb-util-dev \
+            libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libegl1-mesa-dev
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\simlite.exe dist\
+          Copy-Item README.md, LICENSE dist\
+          Copy-Item assets\simlite-logo.png dist\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.bin }}" dist/
+          chmod +x "dist/${{ matrix.bin }}"
+          cp README.md LICENSE dist/
+          cp assets/simlite-logo.png dist/ 2>/dev/null || true
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: SIM Lite ${{ steps.tag.outputs.tag }}
+          draft: false
+          generate_release_notes: true
+          body: |
+            ## SIM Lite ${{ steps.tag.outputs.tag }}
+
+            Viewer leve open source de CFTV Intelbras (Rust + Slint).
+
+            ### Downloads
+            | Plataforma | Arquivo |
+            |------------|---------|
+            | Windows x64 | `simlite-windows-x64.zip` |
+            | Linux x64 | `simlite-linux-x64.tar.gz` |
+            | macOS Apple Silicon | `simlite-macos-arm64.tar.gz` |
+            | macOS Intel | `simlite-macos-x64.tar.gz` |
+
+            ### Requisitos
+            - **FFmpeg** instalado e no `PATH` (`ffmpeg -version`)
+            - DVR/NVR Intelbras com RTSP acessível
+
+            ### Windows
+            Extraia o zip e execute `simlite.exe`.
+
+            ### Linux / macOS
+            ```bash
+            tar -xzf simlite-*.tar.gz
+            chmod +x simlite
+            ./simlite
+            ```
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
