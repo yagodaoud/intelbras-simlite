@@ -263,6 +263,7 @@ fn spawn_plan(plan: &FfmpegPlan, width: u32, height: u32) -> Result<FfmpegSessio
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // Esconde console do FFmpeg; o app em release também usa windows_subsystem.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }

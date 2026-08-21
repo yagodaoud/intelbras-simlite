@@ -1,5 +1,6 @@
 /target
 /dist
+/release-dl
 **/*.rs.bk
 .idea/
 .vscode/

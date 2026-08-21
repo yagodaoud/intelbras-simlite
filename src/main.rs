@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 slint::include_modules!();
 
 use std::sync::{Arc, Mutex};
@@ -79,7 +81,7 @@ fn main() {
     ui.set_setup_http(config.device.http_port.to_string().into());
     ui.set_setup_channels(config.device.channel_count.to_string().into());
     ui.set_device_name(config.device.name.clone().into());
-    ui.set_layout_n(layout_n(mosaic.layout()));
+    ui.set_layout_n(mosaic.selected().len() as i32);
     let side = config.mosaic.sidebar_width.clamp(120, 280);
     ui.set_side_width_px(side as f32);
     ui.set_live_quality(config.mosaic.live_profile == LiveProfile::Quality);
@@ -137,6 +139,7 @@ fn main() {
                 } else {
                     refresh_slots(&ui, &mut st);
                 }
+                sync_grid_cols(&ui);
             }
         }
     });
@@ -188,17 +191,17 @@ fn main() {
             let mosaic = st.mosaic.clone();
             st.config.sync_from_mosaic(&mosaic);
             let _ = config::save(&st.path, &st.config);
-            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
             if st.mode == ViewMode::Live {
                 st.live_selected = st.mosaic.selected().to_vec();
                 apply_diff(&mut st, diff);
-                refresh_slots(&ui, &mut st);
             } else if st.playback.is_some() {
                 st.playback_tick = Some(Instant::now());
                 st.playback_waiting = true;
                 let _ = start_playback_stream(&mut st);
-                refresh_slots(&ui, &mut st);
             }
+            // Sempre reconstrói o grid (live e playback) conforme a seleção atual.
+            refresh_slots(&ui, &mut st);
             refresh_cameras(&ui, &st.mosaic);
             ui.set_status(format!("{} câmera(s) · grid automático", st.mosaic.selected().len()).into());
         }
@@ -216,7 +219,7 @@ fn main() {
             let mosaic = st.mosaic.clone();
             st.config.sync_from_mosaic(&mosaic);
             let _ = config::save(&st.path, &st.config);
-            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
             if st.mode == ViewMode::Live {
                 st.live_selected = st.mosaic.selected().to_vec();
                 apply_diff(&mut st, diff);
@@ -305,7 +308,7 @@ fn main() {
                     ui.set_show_setup(false);
                     ui.set_live_mode(true);
                     ui.set_device_name(st.config.device.name.clone().into());
-                    ui.set_layout_n(layout_n(st.mosaic.layout()));
+                    ui.set_layout_n(st.mosaic.selected().len() as i32);
                     refresh_cameras(&ui, &st.mosaic);
                     ui.set_status(live_status(&st));
                 }
@@ -328,7 +331,7 @@ fn main() {
             let _ = st.mosaic.select_only(&selected);
             restart_live(&mut st);
             ui.set_live_mode(true);
-            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
             refresh_cameras(&ui, &st.mosaic);
             ui.set_status(live_status(&st));
         }
@@ -345,7 +348,10 @@ fn main() {
             }
             st.mode = ViewMode::Playback;
             st.hub.stop_all();
+            st.last_ui_gen.clear();
             ui.set_live_mode(false);
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
+            refresh_slots(&ui, &mut st);
             refresh_calendar(&ui, &st);
             ui.set_status("Escolha data/hora e abra a reprodução".into());
         }
@@ -430,7 +436,7 @@ fn main() {
             }
             ui.set_live_mode(false);
             ui.set_play_has_video(false);
-            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
             refresh_cameras(&ui, &st.mosaic);
             refresh_slots(&ui, &mut st);
             refresh_playback_ui(&ui, &mut st);
@@ -519,15 +525,6 @@ fn live_status(st: &State) -> slint::SharedString {
     }
 }
 
-fn layout_n(layout: Layout) -> i32 {
-    match layout {
-        Layout::One => 1,
-        Layout::Two => 2,
-        Layout::Four => 4,
-        Layout::Six => 6,
-    }
-}
-
 fn decode_opts(layout: Layout, mode: ViewMode, profile: LiveProfile, speed: f32) -> DecodeOpts {
     match mode {
         ViewMode::Playback => DecodeOpts::playback(speed),
@@ -538,6 +535,43 @@ fn decode_opts(layout: Layout, mode: ViewMode, profile: LiveProfile, speed: f32)
             (LiveProfile::Performance, _) => DecodeOpts::mosaic_perf(),
         },
     }
+}
+
+/// Colunas do mosaico: 1 câmera = tela cheia; em janela alta empilha mais.
+fn grid_cols(slot_count: usize, portrait: bool) -> i32 {
+    match slot_count {
+        0 | 1 => 1,
+        2 => {
+            if portrait {
+                1
+            } else {
+                2
+            }
+        }
+        3 => {
+            if portrait {
+                1
+            } else {
+                2
+            }
+        }
+        4 => 2,
+        _ => {
+            if portrait {
+                2
+            } else {
+                3
+            }
+        }
+    }
+}
+
+fn sync_grid_cols(ui: &AppWindow) {
+    use slint::Model;
+    let n = ui.get_slots().row_count();
+    let size = ui.window().size();
+    let portrait = size.height > size.width;
+    ui.set_cols(grid_cols(n, portrait));
 }
 
 fn restart_live(st: &mut State) {
@@ -716,10 +750,12 @@ fn refresh_slots_inner(ui: &AppWindow, st: &mut State, force: bool) {
             any = true;
         }
         if any || mosaic_slots.is_empty() {
-            ui.set_layout_n(layout_n(st.mosaic.layout()));
+            ui.set_layout_n(st.mosaic.selected().len() as i32);
+            sync_grid_cols(ui);
             return;
         }
-        ui.set_layout_n(layout_n(st.mosaic.layout()));
+        ui.set_layout_n(st.mosaic.selected().len() as i32);
+        sync_grid_cols(ui);
         return;
     }
 
@@ -743,7 +779,8 @@ fn refresh_slots_inner(ui: &AppWindow, st: &mut State, force: bool) {
     st.last_ui_gen
         .retain(|ch, _| items.iter().any(|s| s.channel as u8 == *ch));
     ui.set_slots(ModelRc::new(VecModel::from(items)));
-    ui.set_layout_n(layout_n(st.mosaic.layout()));
+    ui.set_layout_n(st.mosaic.selected().len() as i32);
+    sync_grid_cols(ui);
 }
 
 fn refresh_calendar(ui: &AppWindow, st: &State) {
@@ -819,7 +856,7 @@ fn refresh_playback_ui(ui: &AppWindow, st: &mut State) {
         };
         ui.set_play_camera_name(name.into());
     }
-    ui.set_layout_n(layout_n(st.mosaic.layout()));
+    ui.set_layout_n(st.mosaic.selected().len() as i32);
 }
 
 fn month_title(year: i32, month: u32) -> String {

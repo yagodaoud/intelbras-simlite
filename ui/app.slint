@@ -269,7 +269,9 @@ export component AppWindow inherits Window {
     in-out property <[SlotView]> slots;
     in-out property <[WeekRow]> calendar-weeks;
     in-out property <int> layout-n: 1;
-    property <int> cols: layout-n <= 1 ? 1 : (layout-n == 2 ? 2 : (layout-n <= 4 ? 2 : 3));
+    property <int> slot-n: root.slots.length;
+    // Atualizado pelo Rust (nº de tiles + orientação da janela).
+    in-out property <int> cols: 1;
     in-out property <string> status: "Configure o DVR para começar";
     in-out property <bool> live-mode: true;
     in-out property <bool> show-setup: true;
@@ -556,17 +558,21 @@ export component AppWindow inherits Window {
                     border-color: #21262d;
                     clip: true;
                     GridLayout {
+                        width: 100%;
+                        height: 100%;
                         padding: 6px;
                         spacing: 6px;
                         for slot[i] in root.slots: MosaicTile {
                             row: (i - mod(i, root.cols)) / root.cols;
                             col: mod(i, root.cols);
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
                             frame: slot.frame;
                             name: slot.name;
                             live-mode: root.live-mode;
                             index: i;
                             cols: root.cols;
-                            slot-count: root.slots.length;
+                            slot-count: root.slot-n;
                             highlight: root.drag-from == i;
                             drop-highlight: root.drop-target == i && root.drop-target != root.drag-from;
                             double-clicked => { root.slot-double-clicked(i); }

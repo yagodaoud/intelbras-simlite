@@ -38,7 +38,8 @@ impl Layout {
         }
     }
 
-    /// 1 → 1x1, 2 → 2x1, 3–4 → 2x2, 5–6 → 3x2.
+    /// 1 → 1×1, 2 → 2×1, 3–4 → 2×2, 5–6 → 3×2.
+    /// A UI deriva as colunas de `slots.length` + orientação da janela.
     pub fn for_count(n: usize) -> Self {
         match n {
             0 | 1 => Self::One,
