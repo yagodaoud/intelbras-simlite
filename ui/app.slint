@@ -1,0 +1,528 @@
+export struct CameraItem {
+    channel: int,
+    name: string,
+    selected: bool,
+}
+
+export struct SlotView {
+    channel: int,
+    name: string,
+    frame: image,
+}
+
+export struct DayCell {
+    day: int,
+    in-month: bool,
+    selected: bool,
+    today: bool,
+}
+
+export struct WeekRow {
+    d0: DayCell,
+    d1: DayCell,
+    d2: DayCell,
+    d3: DayCell,
+    d4: DayCell,
+    d5: DayCell,
+    d6: DayCell,
+}
+
+component AccentButton inherits Rectangle {
+    in-out property <string> text;
+    in-out property <bool> primary: true;
+    in-out property <bool> enabled: true;
+    callback clicked();
+    height: 28px;
+    border-radius: 6px;
+    background: !enabled ? #1c2128 : (primary ? (ta.has-hover ? #2ea043 : #238636) : (ta.has-hover ? #21262d : #161b22));
+    border-width: 1px;
+    border-color: primary ? #3fb95044 : #30363d;
+    horizontal-stretch: 1;
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text;
+        color: root.enabled ? #e6edf3 : #6e7681;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
+component IconButton inherits Rectangle {
+    in-out property <string> text;
+    in-out property <bool> active: false;
+    callback clicked();
+    min-width: 36px;
+    height: 28px;
+    border-radius: 6px;
+    background: active ? #238636 : (ta.has-hover ? #21262d : transparent);
+    ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.text;
+        color: active ? #ffffff : #8b949e;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
+component Field inherits Rectangle {
+    in-out property <string> label;
+    in-out property <string> value;
+    in-out property <bool> secret: false;
+    in-out property <bool> enabled: true;
+    height: 54px;
+    background: transparent;
+    VerticalLayout {
+        spacing: 4px;
+        Text { text: label; color: #8b949e; font-size: 11px; }
+        Rectangle {
+            height: 32px;
+            border-radius: 6px;
+            background: #0d1117;
+            border-width: 1px;
+            border-color: #30363d;
+            TextInput {
+                x: 8px;
+                width: parent.width - 16px;
+                height: 100%;
+                text <=> root.value;
+                color: #e6edf3;
+                font-size: 13px;
+                enabled: root.enabled;
+                input-type: root.secret ? InputType.password : InputType.text;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "SIM Lite";
+    min-width: 900px;
+    min-height: 640px;
+    preferred-width: 1280px;
+    preferred-height: 900px;
+    background: #0b0f14;
+
+    in-out property <[CameraItem]> cameras;
+    in-out property <[SlotView]> slots;
+    in-out property <[WeekRow]> calendar-weeks;
+    in-out property <int> layout-n: 1;
+    property <int> cols: layout-n <= 1 ? 1 : (layout-n == 2 ? 2 : (layout-n <= 4 ? 2 : 3));
+    in-out property <string> status: "Configure o DVR para começar";
+    in-out property <bool> live-mode: true;
+    in-out property <bool> show-setup: true;
+    in-out property <string> device-name: "DVR";
+    in-out property <string> setup-host;
+    in-out property <string> setup-user: "viewer";
+    in-out property <string> setup-password;
+    in-out property <string> setup-rtsp: "554";
+    in-out property <string> setup-http: "80";
+    in-out property <string> setup-channels: "6";
+    in-out property <int> playback-channel: 1;
+    in-out property <string> calendar-title: "Agosto 2026";
+    in-out property <float> play-progress: 0.0;
+    in-out property <string> play-time-label: "00:00:00";
+    in-out property <string> play-range-label: "";
+    in-out property <float> play-speed: 1.0;
+    in-out property <image> play-frame;
+    in-out property <string> play-camera-name: "Câmera";
+    in-out property <bool> busy: false;
+    in-out property <bool> play-has-video: false;
+    in-out property <float> side-width-px: 168;
+    in-out property <length> side-width: max(120px, min(280px, side-width-px * 1px));
+    property <length> cell-w: max(22px, (side-width - 28px) / 7);
+    property <bool> side-dragging: false;
+    property <float> side-drag-origin: 168;
+    property <float> side-drag-mouse0: 0;
+
+    callback toggle-camera(int);
+    callback save-setup();
+    callback go-live();
+    callback go-playback-tab();
+    callback calendar-prev();
+    callback calendar-next();
+    callback calendar-pick(int);
+    callback start-playback();
+    callback seek-playback(float);
+    callback set-speed(float);
+    callback poll-frames();
+    callback sidebar-resized(int);
+
+    timer := Timer {
+        running: true;
+        interval: 200ms;
+        triggered => { root.poll-frames(); }
+    }
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: root.side-width;
+            background: #0e141b;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                        width: 7px; height: 7px; y: 5px;
+                        border-radius: 4px;
+                        background: root.live-mode ? #3fb950 : #d29922;
+                    }
+                    VerticalLayout {
+                        Text { text: "SIM Lite"; color: #e6edf3; font-size: 14px; font-weight: 700; }
+                        Text { text: root.device-name; color: #8b949e; font-size: 10px; }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    AccentButton { text: "Ao vivo"; primary: root.live-mode; clicked => { root.go-live(); } }
+                    AccentButton { text: "Reprodução"; primary: !root.live-mode; clicked => { root.go-playback-tab(); } }
+                }
+
+                Rectangle { height: 1px; background: #21262d; }
+
+                if root.live-mode: VerticalLayout {
+                    spacing: 6px;
+                    vertical-stretch: 1;
+                    Text {
+                        text: "CÂMERAS  ·  \{root.layout-n}";
+                        color: #6e7681; font-size: 10px; font-weight: 700;
+                    }
+                    VerticalLayout {
+                        spacing: 3px;
+                        vertical-stretch: 1;
+                        for cam in root.cameras: Rectangle {
+                            height: 28px;
+                            border-radius: 6px;
+                            background: cam.selected ? #23863622 : #161b22;
+                            border-width: 1px;
+                            border-color: cam.selected ? #3fb95055 : #21262d;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 7px; height: 7px; y: 10px;
+                                    border-radius: 4px;
+                                    background: cam.selected ? #3fb950 : #484f58;
+                                }
+                                Text {
+                                    text: cam.name;
+                                    color: #e6edf3;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                            TouchArea { clicked => { root.toggle-camera(cam.channel); } }
+                        }
+                    }
+                }
+
+                if !root.live-mode: VerticalLayout {
+                    spacing: 8px;
+                    vertical-stretch: 1;
+                    Text { text: "CANAL"; color: #6e7681; font-size: 10px; font-weight: 700; }
+                    VerticalLayout {
+                        spacing: 3px;
+                        for cam in root.cameras: Rectangle {
+                            height: 26px;
+                            border-radius: 6px;
+                            background: cam.channel == root.playback-channel ? #d2992222 : #161b22;
+                            border-width: 1px;
+                            border-color: cam.channel == root.playback-channel ? #d2992255 : #21262d;
+                            Text {
+                                text: cam.name;
+                                color: #e6edf3;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                x: 8px;
+                                height: 100%;
+                                overflow: elide;
+                            }
+                            TouchArea { clicked => { root.playback-channel = cam.channel; } }
+                        }
+                    }
+
+                    Text { text: "DATA  ·  00:00"; color: #6e7681; font-size: 10px; font-weight: 700; }
+                    HorizontalLayout {
+                        IconButton { text: "‹"; clicked => { root.calendar-prev(); } }
+                        Text {
+                            text: root.calendar-title;
+                            color: #e6edf3;
+                            font-size: 11px;
+                            font-weight: 600;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        IconButton { text: "›"; clicked => { root.calendar-next(); } }
+                    }
+                    // Calendário em % da sidebar (7 colunas)
+                    HorizontalLayout {
+                        spacing: 0px;
+                        for w in ["D","S","T","Q","Q","S","S"]: Text {
+                            text: w; color: #6e7681; font-size: 9px; width: root.cell-w; horizontal-alignment: center;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 1px;
+                        for week in root.calendar-weeks: HorizontalLayout {
+                            spacing: 1px;
+                            for cell in [week.d0, week.d1, week.d2, week.d3, week.d4, week.d5, week.d6]: Rectangle {
+                                width: root.cell-w;
+                                height: max(22px, root.cell-w * 0.9);
+                                border-radius: 4px;
+                                background: cell.selected ? #238636 : (cell.today ? #21262d : transparent);
+                                opacity: cell.in-month ? 1.0 : 0.35;
+                                Text {
+                                    text: "\{cell.day}";
+                                    color: cell.selected ? white : #c9d1d9;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                TouchArea {
+                                    clicked => { if (cell.in-month) { root.calendar-pick(cell.day); } }
+                                }
+                            }
+                        }
+                    }
+
+                    AccentButton {
+                        text: "Abrir reprodução";
+                        enabled: !root.busy;
+                        clicked => { root.start-playback(); }
+                    }
+                    Text {
+                        text: root.play-has-video
+                            ? "Clique na barra p/ seek."
+                            : "Sem vídeo? Arraste a barra.";
+                        color: #6e7681; font-size: 10px; wrap: word-wrap;
+                    }
+                }
+
+                AccentButton {
+                    text: "Dispositivo";
+                    primary: false;
+                    clicked => { root.show-setup = true; }
+                }
+            }
+        }
+
+        // Handle pra arrastar a sidebar (mais estreita = mais vídeo)
+        Rectangle {
+            width: 5px;
+            background: split-ta.has-hover || root.side-dragging ? #30363d : #161b22;
+            split-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                moved => {
+                    if (self.pressed) {
+                        if (!root.side-dragging) {
+                            root.side-dragging = true;
+                            root.side-drag-origin = root.side-width-px;
+                            root.side-drag-mouse0 = self.mouse-x / 1px;
+                        }
+                        root.side-width-px = max(120, min(280, root.side-drag-origin + self.mouse-x / 1px - root.side-drag-mouse0));
+                    } else if (root.side-dragging) {
+                        root.side-dragging = false;
+                        root.sidebar-resized(round(root.side-width-px));
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: #0b0f14;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+
+                if root.live-mode: Rectangle {
+                    vertical-stretch: 1;
+                    background: #05080c;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: #21262d;
+                    GridLayout {
+                        padding: 6px;
+                        spacing: 6px;
+                        for slot[i] in root.slots: Rectangle {
+                            row: (i - mod(i, root.cols)) / root.cols;
+                            col: mod(i, root.cols);
+                            border-radius: 8px;
+                            clip: true;
+                            background: #0d1117;
+                            // contain = encaixa sem zoom/crop (como o SIM Next no vertical)
+                            Image {
+                                source: slot.frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: fill;
+                            }
+                            Rectangle {
+                                height: 26px;
+                                y: parent.height - self.height;
+                                background: #00000088;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: slot.name;
+                                        color: white;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: "LIVE";
+                                        color: #3fb950;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.slots.length == 0: Text {
+                        text: "Selecione câmeras à esquerda";
+                        color: #484f58;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+
+                if !root.live-mode: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 10px;
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #05080c;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #21262d;
+                        clip: true;
+                        Image {
+                            source: root.play-frame;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: fill;
+                        }
+                        Rectangle {
+                            height: 32px;
+                            y: parent.height - self.height;
+                            background: #00000099;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                Text {
+                                    text: root.play-camera-name;
+                                    color: white; font-size: 13px; font-weight: 600;
+                                    vertical-alignment: center; horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: "PLAY  \{root.play-range-label}";
+                                    color: #d29922; font-size: 11px; font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            height: 18px;
+                            border-radius: 9px;
+                            background: #161b22;
+                            Rectangle {
+                                width: parent.width * root.play-progress;
+                                height: 100%;
+                                border-radius: 9px;
+                                background: #d29922;
+                            }
+                            TouchArea {
+                                clicked => {
+                                    if (self.width > 0) {
+                                        root.seek-playback(self.mouse-x / self.width);
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            Text { text: root.play-time-label; color: #c9d1d9; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                            IconButton { text: "0.5x"; active: root.play-speed < 0.75; clicked => { root.set-speed(0.5); } }
+                            IconButton { text: "1x"; active: root.play-speed > 0.75 && root.play-speed < 1.5; clicked => { root.set-speed(1.0); } }
+                            IconButton { text: "2x"; active: root.play-speed > 1.5 && root.play-speed < 3.0; clicked => { root.set-speed(2.0); } }
+                            IconButton { text: "4x"; active: root.play-speed > 3.0; clicked => { root.set-speed(4.0); } }
+                        }
+                    }
+                }
+
+                Text { text: root.status; color: #8b949e; font-size: 12px; }
+            }
+        }
+    }
+
+    if show-setup: Rectangle {
+        background: #0b0f14cc;
+        TouchArea {}
+        Rectangle {
+            width: 420px;
+            height: 520px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 16px;
+            background: #0e141b;
+            border-width: 1px;
+            border-color: #30363d;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 10px;
+                Text { text: "Conectar ao DVR"; color: #e6edf3; font-size: 20px; font-weight: 700; }
+                Text {
+                    text: "A senha vai para o Credential Manager do Windows. Porta web só é necessária se listar arquivos; reprodução usa RTSP.";
+                    color: #8b949e;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Field { label: "IP / host"; value <=> root.setup-host; }
+                Field { label: "Usuário"; value <=> root.setup-user; }
+                Field { label: "Senha"; value <=> root.setup-password; secret: true; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Field { label: "RTSP"; value <=> root.setup-rtsp; }
+                    Field { label: "HTTP"; value <=> root.setup-http; }
+                    Field { label: "Canais"; value <=> root.setup-channels; }
+                }
+                AccentButton { text: "Salvar e conectar"; clicked => { root.save-setup(); } }
+                AccentButton { text: "Cancelar"; primary: false; clicked => { root.show-setup = false; } }
+            }
+        }
+    }
+}

@@ -1,0 +1,16 @@
+---
+description: Convenções de segurança do SIM Lite
+alwaysApply: true
+---
+
+# Segurança
+
+- Senha nunca entra em `config.json`, logs, `Display`, `Debug`, panic ou mensagem de erro.
+- Use `SecretString` e `RtspUrl`; o processo FFmpeg recebe a URL só via argumento, nunca via `tracing`.
+- Host/usuário são validados (sem `@`, `/`, CR/LF) para bloquear injeção em RTSP/CGI.
+- Canal é tipo `Channel` (1..=128), nunca interpolar `&str` cru em URL.
+- Token CGI só segue se for alfanumérico.
+- `redact_secrets_in_text` em stderr do FFmpeg e em qualquer texto logado.
+- Preferir conta **viewer** no DVR, não `admin`.
+- RTSP sempre TCP. Playback vem do HD do DVR (CGI + RTSP), não baixa `.dav` pro PC.
+- Teste novo código de URL/auth/config com um caso que falharia se a senha vazasse.
