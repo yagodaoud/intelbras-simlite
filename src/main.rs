@@ -33,6 +33,8 @@ struct State {
     cal_year: i32,
     cal_month: u32,
     cal_selected: NaiveDate,
+    live_started: Option<Instant>,
+    live_offline_notified: bool,
 }
 
 fn main() {
@@ -111,6 +113,8 @@ fn main() {
         cal_year: today.year(),
         cal_month: today.month(),
         cal_selected: today,
+        live_started: None,
+        live_offline_notified: false,
     }));
 
     {
@@ -138,6 +142,7 @@ fn main() {
                     refresh_playback_ui(&ui, &mut st);
                 } else {
                     refresh_slots(&ui, &mut st);
+                    notify_live_offline(&mut st, &ui);
                 }
                 sync_grid_cols(&ui);
             }
@@ -581,12 +586,38 @@ fn restart_live(st: &mut State) {
     st.playback_tick = None;
     st.playback_waiting = false;
     st.last_ui_gen.clear();
+    st.live_started = Some(Instant::now());
+    st.live_offline_notified = false;
     apply_diff(
         st,
         SessionDiff {
             start: st.mosaic.selected().to_vec(),
             stop: Vec::new(),
         },
+    );
+}
+
+fn notify_live_offline(st: &mut State, ui: &AppWindow) {
+    if st.secret.is_none() || st.mosaic.selected().is_empty() || st.live_offline_notified {
+        return;
+    }
+    let any_frame = st
+        .mosaic
+        .selected()
+        .iter()
+        .any(|ch| st.hub.generation(*ch) > 0);
+    if any_frame {
+        st.live_offline_notified = false;
+        return;
+    }
+    let Some(started) = st.live_started else { return };
+    if started.elapsed().as_secs() < 5 {
+        return;
+    }
+    st.live_offline_notified = true;
+    let host = st.config.device.host.clone();
+    ui.set_status(
+        format!("Sem vídeo — DVR {host} não responde (rede/IP/ligado?). Tentando de novo…").into(),
     );
 }
 
