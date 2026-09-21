@@ -159,6 +159,11 @@ impl FfmpegPlan {
                     } else {
                         "0".into()
                     },
+                    // Evita hang eterno quando o DVR está offline (µs).
+                    "-timeout".into(),
+                    "5000000".into(),
+                    "-rw_timeout".into(),
+                    "5000000".into(),
                     "-rtsp_transport".into(),
                     "tcp".into(),
                 ]);
@@ -221,7 +226,8 @@ impl FfmpegPlan {
 }
 
 pub struct FfmpegSession {
-    child: Child,
+    /// Shared so `SlotWorker::drop` can kill FFmpeg before joining the reader thread.
+    child: Arc<Mutex<Option<Child>>>,
     stdout: ChildStdout,
     width: u32,
     height: u32,
@@ -231,7 +237,16 @@ pub struct FfmpegSession {
 impl FfmpegSession {
     pub fn spawn(source: &InputSource, opts: DecodeOpts) -> Result<Self, PlayerError> {
         let plan = FfmpegPlan::live_or_playback(source, opts);
-        spawn_plan(&plan, opts.width, opts.height)
+        spawn_plan(&plan, opts.width, opts.height, Arc::new(Mutex::new(None)))
+    }
+
+    fn spawn_shared(
+        source: &InputSource,
+        opts: DecodeOpts,
+        child: Arc<Mutex<Option<Child>>>,
+    ) -> Result<Self, PlayerError> {
+        let plan = FfmpegPlan::live_or_playback(source, opts);
+        spawn_plan(&plan, opts.width, opts.height, child)
     }
 
     pub fn read_frame(&mut self) -> Result<RgbFrame, PlayerError> {
@@ -249,12 +264,37 @@ impl FfmpegSession {
 
 impl Drop for FfmpegSession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_child(&self.child);
     }
 }
 
-fn spawn_plan(plan: &FfmpegPlan, width: u32, height: u32) -> Result<FfmpegSession, PlayerError> {
+fn kill_child(child: &Mutex<Option<Child>>) {
+    let Ok(mut guard) = child.lock() else { return };
+    if let Some(mut c) = guard.take() {
+        #[cfg(windows)]
+        {
+            // FFmpeg pode ter filhos (hwaccel); mata a árvore inteira.
+            use std::os::windows::process::CommandExt;
+            let pid = c.id();
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x0800_0000)
+                .status();
+        }
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+fn spawn_plan(
+    plan: &FfmpegPlan,
+    width: u32,
+    height: u32,
+    child_slot: Arc<Mutex<Option<Child>>>,
+) -> Result<FfmpegSession, PlayerError> {
     let mut cmd = Command::new(&plan.program);
     cmd.args(plan.argv())
         .stdin(Stdio::null())
@@ -279,8 +319,15 @@ fn spawn_plan(plan: &FfmpegPlan, width: u32, height: u32) -> Result<FfmpegSessio
         });
     }
     let stdout = child.stdout.take().ok_or(PlayerError::Ended)?;
+    if let Ok(mut guard) = child_slot.lock() {
+        *guard = Some(child);
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(PlayerError::Ended);
+    }
     Ok(FfmpegSession {
-        child,
+        child: child_slot,
         stdout,
         width,
         height,
@@ -298,6 +345,7 @@ pub enum PlayerError {
 
 struct SlotWorker {
     stop: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
     latest: Arc<Mutex<Option<RgbFrame>>>,
     generation: Arc<std::sync::atomic::AtomicU64>,
     join: Option<JoinHandle<()>>,
@@ -306,9 +354,17 @@ struct SlotWorker {
 impl Drop for SlotWorker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        // Nunca dar join na thread da UI: se o FFmpeg está preso no connect/read (DVR offline),
+        // join() virava AppHang. Mata o processo e abandona o worker (Drop de JoinHandle = detach).
+        kill_child(&self.child);
+        let child = Arc::clone(&self.child);
+        drop(self.join.take());
+        thread::spawn(move || {
+            for _ in 0..20 {
+                kill_child(&child);
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
     }
 }
 
@@ -359,9 +415,11 @@ impl Default for PlayerHub {
 
 fn spawn_worker(source: InputSource, opts: DecodeOpts) -> SlotWorker {
     let stop = Arc::new(AtomicBool::new(false));
+    let child = Arc::new(Mutex::new(None));
     let latest = Arc::new(Mutex::new(None));
     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let stop_t = stop.clone();
+    let child_t = child.clone();
     let latest_t = latest.clone();
     let gen_t = generation.clone();
     let join = thread::spawn(move || {
@@ -378,7 +436,7 @@ fn spawn_worker(source: InputSource, opts: DecodeOpts) -> SlotWorker {
             let mut try_opts = opts;
             try_opts.hwaccel = attempt_hw;
             let mut saw_frame = false;
-            match FfmpegSession::spawn(&source, try_opts) {
+            match FfmpegSession::spawn_shared(&source, try_opts, child_t.clone()) {
                 Ok(mut session) => {
                     loop {
                         if stop_t.load(Ordering::SeqCst) {
@@ -402,16 +460,31 @@ fn spawn_worker(source: InputSource, opts: DecodeOpts) -> SlotWorker {
                 }
                 Err(_) => break,
             }
+            kill_child(&child_t);
+            if stop_t.load(Ordering::SeqCst) {
+                break;
+            }
             if attempt_hw && !saw_frame {
                 attempt_hw = false;
                 continue;
             }
-            // Sem vídeo (ex.: sem gravação nesse horário): não fica reiniciando em loop.
-            break;
+            // Sem vídeo (ex.: DVR offline / sem gravação): espera e tenta de novo no live.
+            // Playback também se beneficia — evita ficar morto até o usuário clicar de novo.
+            for _ in 0..20 {
+                if stop_t.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+            if stop_t.load(Ordering::SeqCst) {
+                break;
+            }
+            attempt_hw = opts.hwaccel;
         }
     });
     SlotWorker {
         stop,
+        child,
         latest,
         generation,
         join: Some(join),
@@ -453,6 +526,8 @@ mod tests {
         let argv = plan.argv();
         assert!(argv.windows(2).any(|w| w == ["-rtsp_transport", "tcp"]));
         assert!(argv.windows(2).any(|w| w == ["-hwaccel", "d3d11va"]));
+        assert!(argv.windows(2).any(|w| w == ["-timeout", "5000000"]));
+        assert!(argv.windows(2).any(|w| w == ["-rw_timeout", "5000000"]));
         assert!(argv.windows(2).any(|w| w == ["-vf", "scale=320:180"]));
         assert!(argv.windows(2).any(|w| w == ["-r", "5"]));
         let debug = plan.redacted_debug();
@@ -465,6 +540,28 @@ mod tests {
         let url = "rtsp://viewer:hunter2@host/x";
         let plan = FfmpegPlan::live_or_playback(&InputSource::Rtsp(url.into()), DecodeOpts::mosaic());
         assert!(!plan.redacted_debug().contains("hunter2"));
+    }
+
+    #[test]
+    fn stopping_unreachable_rtsp_does_not_hang_ui_thread() {
+        use crate::domain::{Channel, Device, StreamKind};
+        use crate::intelbras;
+        use crate::security::SecretString;
+        use std::time::{Duration, Instant};
+
+        let channel = Channel::new(1).unwrap();
+        let device = Device::new("t", "t", "192.0.2.1", 554, 80, "viewer", 1).unwrap();
+        let secret = SecretString::new("x");
+        let url = intelbras::live_url(&device, &secret, channel, StreamKind::Extra);
+        let mut hub = PlayerHub::new();
+        hub.start_rtsp(channel, &url, DecodeOpts::mosaic_perf());
+        thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        hub.stop(channel);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "stop() blocked the caller — FFmpeg must be killed before join"
+        );
     }
 
     #[test]
